@@ -527,6 +527,57 @@ class RunContext:
         self.score(judge_name, verdict.passed, data_type="BOOLEAN", comment=verdict.rationale)
         return verdict
 
+    def evaluate(
+        self,
+        metrics,
+        *,
+        question: Optional[str] = None,
+        answer: Optional[str] = None,
+        context=None,
+        expected: Optional[str] = None,
+        model: Optional[str] = None,
+        thresholds: Optional[dict] = None,
+    ):
+        """Score this run's output on built-in or custom metrics (see
+        `experimentlens.evals.METRICS`) and log the results, e.g.
+
+            report = ctx.evaluate(["faithfulness", "answer_relevance", "toxicity", "pii_leakage"],
+                                  question=q, answer=a, context=chunks)
+            return {"latency_ms": ..., **report.metrics()}
+
+        Each score (0..1, higher is better) is logged as an MLflow metric
+        `eval_<name>`, so runs can be compared and checked for regressions. On the
+        trace, LLM-judged metrics appear as `judge_<name>` verdicts (the Judges
+        views pick them up) and rule-based ones as BOOLEAN checker scores. Returns
+        an EvalReport of {name: EvalResult(score, passed, reason, ...)}.
+
+        Return `report.metrics()` from `run_case` as well, so `summarize()` and
+        `find_regressions()` see the scores in run_experiment's results.
+        """
+        from .evals import evaluate
+
+        report = evaluate(
+            metrics, question=question, answer=answer, context=context,
+            expected=expected, model=model, thresholds=thresholds,
+        )
+        for name, result in report.items():
+            if result.model is None:
+                self.score(name, result.passed, data_type="BOOLEAN", comment=result.reason)
+                continue
+            judge_name = f"judge_{name}"
+            tokens = result.llm_result.total_tokens if result.llm_result else 0
+            self._log_finished_observation(
+                "generation",
+                judge_name,
+                input={"prompt": f"Metric: {name}\nQuestion: {question}\nAnswer: {answer}", "model": result.model},
+                output={"answer": result.reason, "passed": result.passed, "score": result.score, "rationale": result.reason},
+                model=result.model,
+                usage_details={"total": tokens} if tokens else None,
+            )
+            self.score(judge_name, result.passed, data_type="BOOLEAN", comment=result.reason)
+        self.log_metrics(report.metrics())
+        return report
+
     def score(self, name: str, value: Any, data_type: str = "NUMERIC", comment: Optional[str] = None) -> None:
         """Attach a score to this run's trace, e.g. ctx.score("task_success", True, "BOOLEAN")."""
         if self.root_span is None:

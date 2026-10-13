@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.0
+
+### Added
+- Built-in evaluation metrics: `ctx.evaluate([...], question=, answer=, context=, expected=)`
+  scores a run on `faithfulness`, `answer_relevance`, `context_relevance`,
+  `correctness`, `toxicity`, `bias`, `prompt_injection` (LLM judges on a 1-5 rubric)
+  and `pii_leakage` (rule-based). Scores are 0-1, higher is better, logged as
+  `eval_<name>` MLflow metrics and as `judge_<name>` verdicts on the trace.
+  `evaluate(...)` computes scores without logging; `Metric(...)` defines your own.
+- Regression checks: `compare`, `find_regressions` and `assert_no_regression`
+  compare a candidate variant against a baseline, account for noise when runs are
+  repeated (Welch's t-test), and raise `RegressionError` for CI. `notify` posts a
+  summary to a Slack-compatible webhook; `load_results` reads past runs from MLflow.
+
 ## 0.2.0
 
 ### Added

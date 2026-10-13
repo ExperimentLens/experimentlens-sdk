@@ -6,6 +6,8 @@ Demonstrates a pattern beyond the plain prompt A/B test in quickstart_experiment
     the trace, distinct from the LLM call)
   - ctx.observe(as_type="generation") for the LLM call
   - ctx.log_judge(...) for an LLM-as-judge pass/fail check
+  - ctx.evaluate(...) for built-in quality and safety metrics (eval_* metrics)
+  - compare(...) to see how one variant moved against another
   - ctx.log_dataset(..., file_format="parquet") to save an enriched row per run
     (embedding + retrieved doc ids + answer), not just the raw case input --
     parquet keeps the embedding as a real list column instead of a stringified
@@ -23,7 +25,7 @@ Run with:
 import hashlib
 import math
 
-from experimentlens import ExperimentTracker, call_llm, messages_to_prompt, print_summary, run_experiment
+from experimentlens import ExperimentTracker, call_llm, compare, messages_to_prompt, print_summary, run_experiment
 
 MODEL = "ollama/llama3.2"
 EMBEDDING_DIM = 16
@@ -97,6 +99,14 @@ def run_case(variant_name, variant_config, case, ctx):
         model=MODEL,
     )
 
+    report = ctx.evaluate(
+        ["faithfulness", "answer_relevance", "context_relevance", "toxicity", "pii_leakage"],
+        question=case["question"],
+        answer=result.text,
+        context=[d["text"] for d in retrieved_docs],
+        model=MODEL,
+    )
+
     ctx.set_trace_io(
         input={"question": case["question"]},
         output={"answer": result.text, "judge_pass_rate": float(verdict.passed)},
@@ -123,13 +133,19 @@ def run_case(variant_name, variant_config, case, ctx):
         "latency_ms": result.latency_ms,
         "total_tokens": result.total_tokens,
         "cost_usd": result.cost_usd,
+        **report.metrics(),
     }
 
 
 def main():
     tracker = ExperimentTracker("rag-topk-ab")
     results = run_experiment(tracker, VARIANTS, DATASET, run_case, case_id_key="id")
-    print_summary(results, metric_names=["task_success", "judge_passed", "latency_ms", "total_tokens", "cost_usd"])
+    metrics = ["task_success", "judge_passed", "eval_faithfulness", "eval_context_relevance", "latency_ms"]
+    print_summary(results, metric_names=metrics)
+
+    print("\ntop2 against top1:")
+    for comparison in compare(results, baseline="top1", candidate="top2", metrics=metrics):
+        print(("  REGRESSED " if comparison.regressed else "  ") + comparison.describe())
     tracker.close()
 
 

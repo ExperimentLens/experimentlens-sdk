@@ -21,6 +21,8 @@ MLflow + Langfuse plumbing.
 | Logs the `explainability/` files the explainability views read | ✓ | |
 | Opens one Langfuse trace per MLflow run and links them both ways | | ✓ |
 | Traces LLM calls, tools and pipeline steps; LLM-as-judge checks | | ✓ |
+| Built-in quality and safety metrics (faithfulness, toxicity, PII, ...) | | ✓ |
+| Fails CI and alerts when a variant regresses against a baseline | ✓ | ✓ |
 | Calls any LLM provider through one function (via LiteLLM) | | ✓ |
 
 ## Requirements
@@ -137,6 +139,78 @@ variant is significantly better than another.
 - Nested variant configs are logged as dotted params:
   `{"retriever": {"k": 5}}` becomes `retriever.k = 5`.
 
+## Built-in evaluation metrics
+
+`ctx.evaluate(...)` scores a run's output on ready-made metrics. Every score is
+between 0 and 1, and higher is always better: for the safety metrics, 1.0 means
+nothing harmful was found.
+
+```python
+def run_case(variant_name, variant, case, ctx):
+    chunks = retrieve(case["question"], k=variant["top_k"])
+    answer = generate(case["question"], chunks)
+
+    report = ctx.evaluate(
+        ["faithfulness", "answer_relevance", "correctness", "toxicity", "pii_leakage"],
+        question=case["question"], answer=answer, context=chunks, expected=case["expected"],
+    )
+    return {"latency_ms": ..., **report.metrics()}  # eval_faithfulness, eval_toxicity, ...
+```
+
+| Metric | Needs | Kind | Passes at |
+|---|---|---|---|
+| `faithfulness` | answer, context | LLM judge | 0.5 |
+| `answer_relevance` | question, answer | LLM judge | 0.5 |
+| `context_relevance` | question, context | LLM judge | 0.5 |
+| `correctness` | question, answer, expected | LLM judge | 0.5 |
+| `toxicity` | answer | LLM judge, safety | 0.75 |
+| `bias` | answer | LLM judge, safety | 0.75 |
+| `prompt_injection` | question | LLM judge, safety | 0.75 |
+| `pii_leakage` | answer | Rule-based (emails, phones, cards, IBANs, SSNs), safety | 1.0 |
+
+LLM judges rate on a 1–5 rubric, normalized to 0–1, using
+`EXPERIMENTLENS_JUDGE_MODEL`. Pick a stronger or different model than the one under
+test. Change a pass mark with `thresholds={"faithfulness": 0.75}`.
+
+What gets logged:
+- each score as an MLflow metric `eval_<name>`, so you can compare runs and check
+  them for regressions;
+- LLM-judged metrics as `judge_<name>` verdicts on the trace, which the Judges
+  views already show;
+- rule-based metrics as boolean checker scores.
+
+Add your own metric with `Metric(...)`: give it a `criterion` and `scale` for an
+LLM judge, or a `check` function for a rule. `evaluate(...)` computes scores
+without logging them.
+
+## Catch regressions
+
+Compare a candidate variant against a baseline and fail when it got worse:
+
+```python
+from experimentlens import assert_no_regression, load_results
+
+results = run_experiment(tracker, VARIANTS, DATASET, run_case, repeats=5)
+assert_no_regression(
+    results, baseline="prod_prompt", candidate="new_prompt",
+    metrics=["eval_faithfulness", "eval_answer_relevance", "latency_ms"],
+    webhook_url=os.environ.get("SLACK_WEBHOOK_URL"),  # optional alert
+)
+```
+
+- **Direction:** metrics named like latency, cost, tokens or errors count as lower
+  is better. Everything else counts as higher is better. Override this with
+  `lower_is_better=[...]`.
+- **Noise:** with repeats, a drop only counts when it is statistically significant
+  at 95%. With a single run per variant, any drop larger than `tolerance` counts.
+- **Failure:** `RegressionError` is raised, so a CI job or pytest test fails.
+  With `webhook_url`, a summary is also posted to a Slack-compatible webhook
+  first.
+- **Earlier baselines:** `load_results("experiment-name")` reads runs back from
+  MLflow, so you can compare against a baseline logged in an earlier session.
+- **Just looking:** `compare(...)` and `find_regressions(...)` return the per-metric
+  comparison without raising.
+
 ## Quickstart: an ML experiment with explainability
 
 ```python
@@ -212,6 +286,9 @@ which calls `close()` for you.
 - `log_judge(name, question=, answer=, criteria=, model=None)`: LLM-as-judge
   check, logged as a judge observation plus a boolean trace score. Returns
   `JudgeResult(passed, rationale, llm_result)`.
+- `evaluate(metrics, question=, answer=, context=, expected=, model=None, thresholds=None)`:
+  score the output on built-in or custom metrics and log them. Returns an
+  `EvalReport`; `report.metrics()` gives `{"eval_<name>": score}`.
 - `score(name, value, data_type="NUMERIC")`: attach a score to the trace.
 - `set_trace_io(input=, output=)`: trace-level input and output.
 - `log_metrics`, `log_params`, `set_tags`, `log_artifact_dict`: MLflow logging
@@ -225,6 +302,11 @@ which calls `close()` for you.
 **`call_llm(messages, model=None, **kwargs)`** calls any LiteLLM model and
 returns an `LLMResult` with `text`, token counts, `latency_ms` and `cost_usd`.
 `llm_judge(...)` is the judge without logging.
+
+**Regressions:** `compare`, `find_regressions` and `assert_no_regression(results,
+baseline, candidate, metrics, webhook_url=None, tolerance=0.0)` compare two
+variants. `load_results(experiment_name)` reads past runs from MLflow, and
+`notify(webhook_url, ...)` posts a summary to a webhook.
 
 ## Examples
 

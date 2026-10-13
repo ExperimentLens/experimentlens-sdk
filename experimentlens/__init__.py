@@ -1,8 +1,18 @@
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 from .config import SDKConfig
+from .evals import METRICS, EvalReport, EvalResult, Metric, evaluate
 from .judge import JudgeResult, llm_judge
 from .llm import LLMResult, call_llm, messages_to_prompt
+from .regression import (
+    MetricComparison,
+    RegressionError,
+    assert_no_regression,
+    compare,
+    find_regressions,
+    load_results,
+    notify,
+)
 from .runner import config_hash, print_summary, run_experiment, summarize
 from .tracking import ExperimentTracker, RunContext
 
@@ -19,4 +29,16 @@ __all__ = [
     "messages_to_prompt",
     "llm_judge",
     "JudgeResult",
+    "evaluate",
+    "Metric",
+    "METRICS",
+    "EvalResult",
+    "EvalReport",
+    "compare",
+    "find_regressions",
+    "assert_no_regression",
+    "notify",
+    "load_results",
+    "MetricComparison",
+    "RegressionError",
 ]
