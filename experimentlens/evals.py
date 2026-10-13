@@ -55,6 +55,7 @@ class EvalResult:
     category: str
     model: Optional[str] = None  # None for rule-based metrics
     llm_result: Optional[LLMResult] = None
+    prompt: Optional[str] = None  # exactly what the judge was asked
 
 
 class EvalReport(dict):
@@ -210,9 +211,9 @@ def _judge(metric: Metric, inputs: dict, model: str, threshold: float) -> EvalRe
     result = call_llm([{"role": "user", "content": prompt}], model=model)
     raw, reason = _parse_score(result.text)
     if raw is None:
-        return EvalResult(metric.name, 0.0, False, f"Unreadable judge output: {reason}", metric.category, model, result)
+        return EvalResult(metric.name, 0.0, False, f"Unreadable judge output: {reason}", metric.category, model, result, prompt)
     score = (raw - 1) / 4
-    return EvalResult(metric.name, score, score >= threshold, reason, metric.category, model, result)
+    return EvalResult(metric.name, score, score >= threshold, reason, metric.category, model, result, prompt)
 
 
 def evaluate(

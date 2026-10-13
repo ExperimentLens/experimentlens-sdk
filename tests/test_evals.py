@@ -75,6 +75,7 @@ def test_context_list_is_numbered_in_the_prompt(fake_judge):
     prompts = fake_judge({})
     evaluate(["faithfulness"], answer="A.", context=["alpha", "beta"])
     assert "[1] alpha\n\n[2] beta" in prompts[0]
+    assert evaluate(["faithfulness"], answer="A.", context="ctx")["faithfulness"].prompt == prompts[-1]
 
 
 def test_safety_metrics_use_a_stricter_default_threshold(fake_judge):

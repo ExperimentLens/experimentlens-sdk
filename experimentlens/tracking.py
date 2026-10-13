@@ -569,7 +569,7 @@ class RunContext:
             self._log_finished_observation(
                 "generation",
                 judge_name,
-                input={"prompt": f"Metric: {name}\nQuestion: {question}\nAnswer: {answer}", "model": result.model},
+                input={"prompt": result.prompt, "model": result.model},
                 output={"answer": result.reason, "passed": result.passed, "score": result.score, "rationale": result.reason},
                 model=result.model,
                 usage_details={"total": tokens} if tokens else None,
