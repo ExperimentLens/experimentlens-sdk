@@ -1,0 +1,57 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "experimentlens"
+dynamic = ["version"]
+description = "Python SDK for ExperimentLens: log ML and LLM/agent experiments to MLflow and Langfuse so they appear in the ExperimentLens UI."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+authors = [{ name = "ExperimentLens contributors" }]
+maintainers = [{ name = "Panayiotis Gidarakos", email = "panosgidarakos@gmail.com" }]
+keywords = ["experimentlens", "mlflow", "langfuse", "llm", "agents", "experiment-tracking", "evaluation", "llm-as-judge"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Operating System :: OS Independent",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
+dependencies = [
+    "mlflow>=2.22",
+    "langfuse>=4.0",
+    "litellm>=1.0",
+    "python-dotenv>=1.0",
+    "pandas>=1.5",
+]
+
+[project.optional-dependencies]
+examples = ["scikit-learn"]
+dev = ["pytest>=8", "scikit-learn"]
+
+[project.urls]
+Homepage = "https://experimentlens.imsi.athenarc.gr/"
+Documentation = "https://experimentlens.imsi.athenarc.gr/docs"
+Source = "https://github.com/ExperimentLens"
+
+[tool.hatch.version]
+path = "experimentlens/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["experimentlens"]
+
+[tool.hatch.build.targets.sdist]
+include = ["experimentlens", "examples", "tests", "README.md", "CHANGELOG.md", "LICENSE", ".env.example"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = [
+    # Raised inside MLflow's own SQL store, not by this package.
+    "ignore:The ``noload`` loader strategy is deprecated",
+]
