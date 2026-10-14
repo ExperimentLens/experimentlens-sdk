@@ -97,3 +97,21 @@ def test_failed_run_records_a_bounded_error_tag(ml_tracker):
     tag = MlflowClient().get_run(ctx.run_id).data.tags["error"]
     assert tag.startswith("ValueError: xxx")
     assert len(tag) == 5000
+
+
+def test_errors_inside_observe_keep_their_type(config):
+    """An exception raised inside ctx.observe() must reach the caller unchanged."""
+    from contextlib import contextmanager
+
+    class FakeLangfuse:
+        @contextmanager
+        def start_as_current_observation(self, **kwargs):
+            yield object()
+
+    tracker = ExperimentTracker(f"obs-{uuid.uuid4().hex[:8]}", config=config, experiment_type="ml")
+    tracker._langfuse = FakeLangfuse()
+    with tracker.start_run("r") as ctx:
+        with pytest.raises(TimeoutError, match="vector store"):
+            with ctx.observe("retrieve"):
+                raise TimeoutError("vector store did not respond")
+    tracker._langfuse = None

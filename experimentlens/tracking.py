@@ -142,9 +142,11 @@ class ExperimentTracker:
         params: Optional[dict] = None,
         tags: Optional[dict] = None,
         variant: Optional[str] = None,
+        trace_metadata: Optional[dict] = None,
     ) -> Iterator["RunContext"]:
         """Start one MLflow run + matching Langfuse trace. Use as a context manager
-        around a single experiment case (e.g. one variant x one dataset item)."""
+        around a single experiment case (e.g. one variant x one dataset item).
+        `trace_metadata` is added to the trace's metadata (values become strings)."""
         with mlflow.start_run(run_name=run_name) as run:
             run_id = run.info.run_id
 
@@ -180,6 +182,7 @@ class ExperimentTracker:
                                     "mlflow_experiment_id": self.experiment_id,
                                     "mlflow_run_id": run_id,
                                     **{k: str(v) for k, v in (params or {}).items()},
+                                    **{k: str(v) for k, v in (trace_metadata or {}).items()},
                                 },
                                 tags=langfuse_tags,
                             )
@@ -439,14 +442,19 @@ class RunContext:
         if self.tracker._langfuse is None:
             yield _NoopObservation()
             return
-        try:
-            with self.tracker._langfuse.start_as_current_observation(
-                name=name, as_type=as_type, **kwargs
-            ) as obs:
-                yield obs
-        except Exception as exc:  # pragma: no cover - defensive
-            warnings.warn(f"Langfuse observe('{name}') failed: {exc}")
-            yield _NoopObservation()
+        with ExitStack() as stack:
+            # Only a failure to *start* the observation is swallowed. An exception raised
+            # inside the block must propagate unchanged: catching it here and yielding
+            # again made Python replace it with "generator didn't stop after throw()",
+            # which hid the real error (e.g. a TimeoutError) from the run's error tag.
+            try:
+                obs = stack.enter_context(
+                    self.tracker._langfuse.start_as_current_observation(name=name, as_type=as_type, **kwargs)
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                warnings.warn(f"Langfuse observe('{name}') failed: {exc}")
+                obs = _NoopObservation()
+            yield obs
 
     def log_generation(
         self,

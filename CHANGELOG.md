@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.1
+
+### Fixed
+- An exception raised inside `ctx.observe(...)` now reaches the caller unchanged. It was
+  replaced by `RuntimeError: generator didn't stop after throw()`, so a failed run's
+  `error` tag hid the real cause (e.g. a `TimeoutError`).
+
+### Added
+- `run_experiment` puts each case's `expected` answer on its trace's metadata, so
+  ExperimentLens can show it next to the actual answer. `start_run(...,
+  trace_metadata={...})` adds any other trace metadata.
+
 ## 0.4.0
 
 ### Added

@@ -97,7 +97,10 @@ def run_experiment(
             tags["experimentlens.repeat"] = str(repeat)
         row = {"variant": variant_name, "case_id": case_id, "repeat": repeat}
         try:
-            with tracker.start_run(run_name, params=params, tags=tags, variant=variant_name) as ctx:
+            # The expected answer travels on the trace, so ExperimentLens can show it next
+            # to the actual answer.
+            expected = {"expected": case["expected"]} if case.get("expected") is not None else None
+            with tracker.start_run(run_name, params=params, tags=tags, variant=variant_name, trace_metadata=expected) as ctx:
                 if log_dataset:
                     ctx.log_dataset([case], name="case", context="evaluation")
                 metrics = run_case(variant_name, variant_config, case, ctx) or {}
