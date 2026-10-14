@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.4.0
+
+### Added
+- Datasets stored in Langfuse: `upload_dataset(name, cases)` creates or updates the
+  items, `load_dataset(name, version=None)` reads them (optionally as they were at a
+  point in time), and `run_experiment(..., dataset="name")` runs on a stored dataset.
+  Runs are tagged `experimentlens.dataset` / `experimentlens.dataset_version` (a
+  content fingerprint) / `experimentlens.dataset_snapshot`; the experiment gets
+  `experimentlens.datasets`; each trace is linked to its dataset item.
+- `examples/dataset_experiment.py`.
+
+### Changed
+- The judge prompt sent to an LLM judge is logged on its `judge_<name>` trace step.
+
 ## 0.3.0
 
 ### Added

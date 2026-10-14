@@ -1,6 +1,7 @@
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 from .config import SDKConfig
+from .datasets import Dataset, load_dataset, upload_dataset
 from .evals import METRICS, EvalReport, EvalResult, Metric, evaluate
 from .judge import JudgeResult, llm_judge
 from .llm import LLMResult, call_llm, messages_to_prompt
@@ -41,4 +42,7 @@ __all__ = [
     "load_results",
     "MetricComparison",
     "RegressionError",
+    "Dataset",
+    "load_dataset",
+    "upload_dataset",
 ]

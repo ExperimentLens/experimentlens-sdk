@@ -5,8 +5,9 @@ import json
 import math
 import statistics
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional, Union
 
+from .datasets import Dataset, link_run_to_item, load_dataset
 from .tracking import ExperimentTracker, RunContext
 
 RunCaseFn = Callable[[str, dict, dict, RunContext], dict]
@@ -22,7 +23,7 @@ _T_CRITICAL_95 = [
 def run_experiment(
     tracker: ExperimentTracker,
     variants: dict[str, dict],
-    dataset: Iterable[dict],
+    dataset: Union[Iterable[dict], Dataset, str],
     run_case: RunCaseFn,
     case_id_key: str = "id",
     log_dataset: bool = False,
@@ -52,6 +53,12 @@ def run_experiment(
     artifact) — off by default; call `ctx.log_dataset(...)` yourself from
     `run_case` for full control over what's logged, when, and in what format.
 
+    `dataset` is a list of case dicts, a `Dataset` from `load_dataset()`, or the name
+    of a dataset stored in Langfuse (loaded as it is now). With a stored dataset, every
+    run is tagged `experimentlens.dataset` / `experimentlens.dataset_version`, so
+    ExperimentLens can tell whether two experiments ran on the same items, and each
+    trace is linked to its dataset item in Langfuse.
+
     A case that raises is recorded with status "error" (and its MLflow run marked
     failed) without stopping the rest of the experiment.
     """
@@ -59,6 +66,18 @@ def run_experiment(
         raise ValueError("repeats must be at least 1")
     if max_workers < 1:
         raise ValueError("max_workers must be at least 1")
+
+    if isinstance(dataset, str):
+        dataset = load_dataset(dataset, config=tracker.config)
+    stored = dataset if isinstance(dataset, Dataset) else None
+    dataset_tags = {}
+    if stored is not None:
+        dataset_tags = {
+            "experimentlens.dataset": stored.name,
+            "experimentlens.dataset_version": stored.version,
+            "experimentlens.dataset_snapshot": stored.snapshot.isoformat(),
+        }
+        tracker.add_dataset_tag(stored.name)
 
     cases = list(dataset)
     jobs = [
@@ -73,7 +92,7 @@ def run_experiment(
         case_id = case.get(case_id_key, "case")
         run_name = f"{variant_name}__{case_id}" + (f"__r{repeat}" if repeats > 1 else "")
         params = {"variant": variant_name, "case_id": str(case_id), **_flatten_params(variant_config)}
-        tags = {"experimentlens.config_hash": config_hash(variant_config)}
+        tags = {"experimentlens.config_hash": config_hash(variant_config), **dataset_tags}
         if repeats > 1:
             tags["experimentlens.repeat"] = str(repeat)
         row = {"variant": variant_name, "case_id": case_id, "repeat": repeat}
@@ -83,6 +102,15 @@ def run_experiment(
                     ctx.log_dataset([case], name="case", context="evaluation")
                 metrics = run_case(variant_name, variant_config, case, ctx) or {}
                 ctx.log_metrics(metrics)
+                item_id = stored.item_id(case) if stored is not None else None
+                if item_id and tracker._langfuse is not None and ctx.root_span is not None:
+                    link_run_to_item(
+                        tracker.config,
+                        run_name=f"{tracker.experiment_name} · {variant_name}",
+                        item_id=item_id,
+                        trace_id=ctx.root_span.trace_id,
+                        metadata={"mlflow_run_id": ctx.run_id, "repeat": repeat},
+                    )
             return {**row, "status": "ok", **metrics}
         except Exception as exc:
             return {**row, "status": "error", "error": str(exc)}

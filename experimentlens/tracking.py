@@ -58,6 +58,7 @@ class ExperimentTracker:
         experiment_type: str = "llm",
     ) -> None:
         self.config = config or SDKConfig.from_env()
+        self.experiment_name = experiment_name
         self.experiment_type = experiment_type
         self._use_langfuse = experiment_type == "llm"
 
@@ -107,6 +108,16 @@ class ExperimentTracker:
                 "Could not determine the Langfuse project id; set LANGFUSE_PROJECT_ID "
                 "so the UI can link this experiment to its traces."
             )
+
+    def add_dataset_tag(self, dataset_name: str) -> None:
+        """Record on the MLflow experiment that it ran on `dataset_name`
+        (`experimentlens.datasets`, comma-separated), so ExperimentLens can list the
+        experiments that used a dataset."""
+        current = self._client.get_experiment(self.experiment_id).tags.get("experimentlens.datasets", "")
+        names = [n for n in current.split(",") if n]
+        if dataset_name not in names:
+            names.append(dataset_name)
+            self._client.set_experiment_tag(self.experiment_id, "experimentlens.datasets", ",".join(names))
 
     def _detect_langfuse_project_id(self) -> Optional[str]:
         """Look up the project the Langfuse API keys belong to."""

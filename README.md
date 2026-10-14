@@ -23,6 +23,7 @@ MLflow + Langfuse plumbing.
 | Traces LLM calls, tools and pipeline steps; LLM-as-judge checks | | ✓ |
 | Built-in quality and safety metrics (faithfulness, toxicity, PII, ...) | | ✓ |
 | Fails CI and alerts when a variant regresses against a baseline | ✓ | ✓ |
+| Versioned test datasets stored in Langfuse, linked to each run | | ✓ |
 | Calls any LLM provider through one function (via LiteLLM) | | ✓ |
 
 ## Requirements
@@ -210,6 +211,33 @@ assert_no_regression(
   MLflow, so you can compare against a baseline logged in an earlier session.
 - **Just looking:** `compare(...)` and `find_regressions(...)` return the per-metric
   comparison without raising.
+
+## Datasets
+
+Store a test set once and run every experiment on it. Datasets live in Langfuse,
+next to the traces.
+
+```python
+from experimentlens import load_dataset, run_experiment, upload_dataset
+
+upload_dataset("capitals-golden", [
+    {"id": "fr", "question": "What is the capital of France?", "expected": "Paris"},
+    {"id": "au", "question": "What is the capital of Australia?", "expected": "Canberra"},
+])
+
+with ExperimentTracker("capitals-on-dataset") as tracker:
+    run_experiment(tracker, VARIANTS, "capitals-golden", run_case)
+```
+
+- **Items:** each case's `expected` becomes the item's expected output, and the rest
+  becomes its input. Cases are keyed by `id`, so uploading a case again updates it.
+- **Versions:** every run is tagged with `experimentlens.dataset` and
+  `experimentlens.dataset_version`, a fingerprint of the items' content.
+  ExperimentLens compares two experiments cleanly only when the versions match.
+- **Reproducing:** `dataset.snapshot` is when the items were read.
+  `load_dataset(name, version=dataset.snapshot)` returns exactly those items again.
+- **Links:** each trace is linked to its dataset item, so the experiment also shows
+  up as a dataset run in Langfuse.
 
 ## Quickstart: an ML experiment with explainability
 
