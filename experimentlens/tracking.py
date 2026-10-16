@@ -149,6 +149,11 @@ class ExperimentTracker:
         `trace_metadata` is added to the trace's metadata (values become strings)."""
         with mlflow.start_run(run_name=run_name) as run:
             run_id = run.info.run_id
+            # MLflow doesn't bump the experiment's last_update_time for new runs, so
+            # record it here; vis-api shows whichever is newer as "last modified".
+            self._client.set_experiment_tag(
+                self.experiment_id, "experimentlens.last_run_at", str(run.info.start_time)
+            )
 
             run_tags = {"experiment_type": self.experiment_type, "experimentlens.sdk_version": __version__}
             # Only claim a linked trace when one is actually being sent; otherwise the
