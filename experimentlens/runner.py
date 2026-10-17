@@ -29,6 +29,7 @@ def run_experiment(
     log_dataset: bool = False,
     repeats: int = 1,
     max_workers: int = 1,
+    baseline: Optional[str] = None,
 ) -> list[dict]:
     """Loop every variant x every dataset case (x every repeat), dual-logging each as
     one MLflow run with a linked Langfuse trace.
@@ -59,6 +60,9 @@ def run_experiment(
     ExperimentLens can tell whether two experiments ran on the same items, and each
     trace is linked to its dataset item in Langfuse.
 
+    `baseline` names the variant the UI compares the others against (default: one
+    named "baseline", else the first alphabetically).
+
     A case that raises is recorded with status "error" (and its MLflow run marked
     failed) without stopping the rest of the experiment.
     """
@@ -66,6 +70,11 @@ def run_experiment(
         raise ValueError("repeats must be at least 1")
     if max_workers < 1:
         raise ValueError("max_workers must be at least 1")
+
+    # Tell the UI which params group runs and identify cases, and what to compare against.
+    tracker.set_conventions(group_param="variant", case_param="case_id")
+    if baseline is not None:
+        tracker.set_baseline(baseline)
 
     if isinstance(dataset, str):
         dataset = load_dataset(dataset, config=tracker.config)

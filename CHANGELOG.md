@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.5.0
+
+### Added
+- The SDK now tells ExperimentLens what its metrics and params mean, as experiment tags,
+  so the UI stops keeping its own copy of these rules:
+  - `ctx.evaluate()` records each `eval_*` metric's pass mark (including custom
+    `thresholds`), direction and kind (`quality` / `safety`).
+  - Metrics named like latency/cost/tokens are recorded as cost metrics when first
+    logged, so they appear in the UI's baseline comparison.
+  - `tracker.describe_metric(name, pass_mark=, direction=, kind=)` declares any other
+    metric, e.g. one whose name would be guessed the wrong way.
+  - `run_experiment(..., baseline="v1")` and `tracker.set_baseline()` set the variant
+    the UI compares against; `tracker.set_conventions(group_param=, case_param=)`
+    names the params for runs logged without `run_experiment`.
+
+### Changed
+- The regression checks guess "lower is better" with the same rules as the UI.
+
 ## 0.4.1
 
 ### Fixed

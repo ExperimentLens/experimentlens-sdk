@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 import warnings
 from contextlib import ExitStack, contextmanager
@@ -11,6 +12,7 @@ from mlflow.tracking import MlflowClient
 
 from . import __version__
 from .config import SDKConfig
+from .conventions import COST_METRIC, METRIC_TAG_PREFIX
 
 _MAX_TAG_LENGTH = 5000
 
@@ -61,6 +63,7 @@ class ExperimentTracker:
         self.experiment_name = experiment_name
         self.experiment_type = experiment_type
         self._use_langfuse = experiment_type == "llm"
+        self._described: dict[str, dict] = {}
 
         mlflow.set_tracking_uri(self.config.mlflow_tracking_uri)
         self._client = MlflowClient()
@@ -118,6 +121,42 @@ class ExperimentTracker:
         if dataset_name not in names:
             names.append(dataset_name)
             self._client.set_experiment_tag(self.experiment_id, "experimentlens.datasets", ",".join(names))
+
+    def describe_metric(
+        self,
+        name: str,
+        *,
+        pass_mark: Optional[float] = None,
+        direction: Optional[str] = None,
+        kind: Optional[str] = None,
+    ) -> None:
+        """Declare what a metric means, so the ExperimentLens UI uses it instead of
+        guessing from the name: its pass mark, whether higher or lower is better
+        (`direction` "maximize" / "minimize") and its `kind` ("quality", "safety",
+        "cost" or "other"; cost metrics appear in the baseline comparison), e.g.
+
+            tracker.describe_metric("wait_time", direction="minimize", kind="cost")
+
+        `ctx.evaluate()` declares its eval_* metrics, and metrics named like
+        latency/cost/tokens are declared as cost metrics when first logged."""
+        definition = {k: v for k, v in {"pass": pass_mark, "direction": direction, "kind": kind}.items() if v is not None}
+        if self._described.get(name) == definition:
+            return
+        self._described[name] = definition
+        self._client.set_experiment_tag(self.experiment_id, f"{METRIC_TAG_PREFIX}{name}", json.dumps(definition))
+
+    def set_baseline(self, group: str) -> None:
+        """The configuration (e.g. variant name) the UI compares the others against."""
+        self._client.set_experiment_tag(self.experiment_id, "experimentlens.baseline", group)
+
+    def set_conventions(self, group_param: Optional[str] = None, case_param: Optional[str] = None) -> None:
+        """Which run param names a configuration and which names a dataset case, when
+        you log runs yourself instead of with run_experiment (which uses "variant" and
+        "case_id"). The UI groups runs and builds its case grid from these."""
+        if group_param:
+            self._client.set_experiment_tag(self.experiment_id, "experimentlens.group_param", group_param)
+        if case_param:
+            self._client.set_experiment_tag(self.experiment_id, "experimentlens.case_param", case_param)
 
     def _detect_langfuse_project_id(self) -> Optional[str]:
         """Look up the project the Langfuse API keys belong to."""
@@ -279,6 +318,9 @@ class RunContext:
         clean = {k: v for k, v in metrics.items() if v is not None}
         if clean:
             mlflow.log_metrics(clean)
+        for name in clean:
+            if name not in self.tracker._described and COST_METRIC.search(name):
+                self.tracker.describe_metric(name, direction="minimize", kind="cost")
 
     def set_tags(self, tags: dict) -> None:
         mlflow.set_tags(tags)
@@ -599,6 +641,10 @@ class RunContext:
                 usage_details={"total": tokens} if tokens else None,
             )
             self.score(judge_name, result.passed, data_type="BOOLEAN", comment=result.reason)
+        for name, result in report.items():
+            self.tracker.describe_metric(
+                f"eval_{name}", pass_mark=result.threshold, direction="maximize", kind=result.category
+            )
         self.log_metrics(report.metrics())
         return report
 

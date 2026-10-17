@@ -2,15 +2,12 @@ from __future__ import annotations
 
 import json
 import math
-import re
 import urllib.request
 from dataclasses import dataclass
 from typing import Iterable, Optional
 
+from .conventions import infer_direction
 from .runner import _t_critical_95, summarize
-
-# Metrics whose name matches this are treated as lower-is-better unless told otherwise.
-_LOWER_IS_BETTER = re.compile(r"latency|duration|cost|tokens|error|_ms$|_s$", re.IGNORECASE)
 
 
 @dataclass
@@ -61,7 +58,7 @@ def compare(
     `lower_is_better` to set the list yourself.
     """
     metrics = list(metrics)
-    lower = set(lower_is_better) if lower_is_better is not None else {m for m in metrics if _LOWER_IS_BETTER.search(m)}
+    lower = set(lower_is_better) if lower_is_better is not None else {m for m in metrics if infer_direction(m) == "minimize"}
     groups = {row[by]: row for row in summarize(results, metrics, by=by)}
     for name in (baseline, candidate):
         if name not in groups:
