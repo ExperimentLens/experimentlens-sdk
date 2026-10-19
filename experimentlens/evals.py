@@ -174,6 +174,40 @@ METRICS: dict[str, Metric] = {
     ]
 }
 
+# Judged on a whole conversation rather than one question/answer pair. Same 1-5 rubric
+# and 0..1 scores as METRICS, so they log as eval_<name> and compare like any other.
+# vis-api's ConversationEvalService holds the same criteria for evaluating from the UI:
+# change both together.
+CONVERSATION_METRICS: dict[str, Metric] = {
+    m.name: m
+    for m in [
+        Metric(
+            "conversation_relevance",
+            ("conversation",),
+            criterion="Is every assistant reply relevant to the user's latest message, given everything said before it?",
+            scale="5 = every reply fits the conversation\n3 = some replies drift or ignore what the user just said\n1 = most replies are off topic",
+        ),
+        Metric(
+            "knowledge_retention",
+            ("conversation",),
+            criterion="Does the assistant remember what the user told it in earlier turns, without asking for it again or contradicting it?",
+            scale="5 = uses earlier details correctly throughout\n3 = forgets or re-asks for some details\n1 = repeatedly forgets or contradicts what the user said",
+        ),
+        Metric(
+            "conversation_completeness",
+            ("conversation",),
+            criterion="By the end of the conversation, has the assistant done everything the user asked for?",
+            scale="5 = every request was handled\n3 = some requests were left unanswered\n1 = the user's main request was not handled",
+        ),
+        Metric(
+            "role_adherence",
+            ("conversation", "role"),
+            criterion="Does the assistant stay within the role described above in every turn (its scope, tone and rules)?",
+            scale="5 = stays in role throughout\n3 = slips out of role once or twice\n1 = ignores the role",
+        ),
+    ]
+}
+
 MetricLike = Union[str, Metric]
 
 
@@ -184,6 +218,14 @@ def _resolve(metric: MetricLike) -> Metric:
         return METRICS[metric]
     except KeyError:
         raise ValueError(f"Unknown metric {metric!r}. Built-in metrics: {', '.join(METRICS)}") from None
+
+
+def format_conversation(turns: Iterable[dict]) -> str:
+    """Turns as the transcript judges read: [{"user": ..., "assistant": ...}, ...]."""
+    lines = []
+    for i, turn in enumerate(turns, start=1):
+        lines.append(f"Turn {i}\nUser: {turn.get('user', '')}\nAssistant: {turn.get('assistant', '')}")
+    return "\n\n".join(lines)
 
 
 def _format_context(context) -> Optional[str]:
@@ -244,6 +286,60 @@ def evaluate(
     """
     resolved = [_resolve(m) for m in metrics]
     inputs = {"question": question, "answer": answer, "context": _format_context(context), "expected": expected}
+    for metric in resolved:
+        missing = [name for name in metric.inputs if inputs.get(name) is None]
+        if missing:
+            raise ValueError(f"Metric {metric.name!r} needs: {', '.join(missing)}")
+
+    model = model or default_judge_model()
+    report = EvalReport()
+    for metric in resolved:
+        threshold = (thresholds or {}).get(metric.name, metric.threshold)
+        if metric.uses_llm:
+            report[metric.name] = _judge(metric, inputs, model, threshold)
+        else:
+            score, reason = metric.check(inputs)
+            report[metric.name] = EvalResult(
+                metric.name, score, score >= threshold, reason, metric.category, threshold=threshold
+            )
+    return report
+
+
+def evaluate_conversation(
+    metrics: Iterable[MetricLike],
+    turns: Iterable[dict],
+    *,
+    role: Optional[str] = None,
+    model: Optional[str] = None,
+    thresholds: Optional[dict[str, float]] = None,
+) -> EvalReport:
+    """Score a whole multi-turn conversation, e.g.
+
+        report = evaluate_conversation(
+            ["knowledge_retention", "conversation_completeness", "role_adherence"],
+            turns=[{"user": "I'm Ana, flight LH123", "assistant": "Thanks Ana..."}, ...],
+            role="You are an airline support agent. Only discuss bookings.",
+        )
+
+    `metrics` are names from CONVERSATION_METRICS or your own Metric objects whose
+    `inputs` are ("conversation",) or ("conversation", "role"). `role` (usually the
+    system prompt) is needed by role_adherence only. Inside a run, call
+    `ctx.evaluate_conversation(...)` so the results are logged as well.
+    """
+    turns = list(turns)
+    if not turns:
+        raise ValueError("evaluate_conversation needs at least one turn")
+    resolved = []
+    for metric in metrics:
+        if isinstance(metric, Metric):
+            resolved.append(metric)
+        elif metric in CONVERSATION_METRICS:
+            resolved.append(CONVERSATION_METRICS[metric])
+        else:
+            raise ValueError(
+                f"Unknown conversation metric {metric!r}. Built-in: {', '.join(CONVERSATION_METRICS)}"
+            )
+    inputs = {"conversation": format_conversation(turns), "role": role}
     for metric in resolved:
         missing = [name for name in metric.inputs if inputs.get(name) is None]
         if missing:

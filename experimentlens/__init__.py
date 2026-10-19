@@ -1,8 +1,8 @@
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 from .config import SDKConfig
 from .datasets import Dataset, load_dataset, upload_dataset
-from .evals import METRICS, EvalReport, EvalResult, Metric, evaluate
+from .evals import CONVERSATION_METRICS, METRICS, EvalReport, EvalResult, Metric, evaluate, evaluate_conversation
 from .judge import JudgeResult, llm_judge
 from .llm import LLMResult, call_llm, messages_to_prompt
 from .regression import (
@@ -31,6 +31,8 @@ __all__ = [
     "llm_judge",
     "JudgeResult",
     "evaluate",
+    "evaluate_conversation",
+    "CONVERSATION_METRICS",
     "Metric",
     "METRICS",
     "EvalResult",

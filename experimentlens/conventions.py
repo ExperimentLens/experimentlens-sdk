@@ -5,6 +5,10 @@ UI reads it instead of guessing from names. Stored as MLflow experiment tags:
     experimentlens.group_param    param that names a configuration ("variant")
     experimentlens.case_param     param that names a dataset case ("case_id")
     experimentlens.baseline       configuration others are compared against
+
+and as run tags:
+
+    experimentlens.conversation_role  the role text conversation evals judged against
 """
 
 from __future__ import annotations
@@ -12,6 +16,7 @@ from __future__ import annotations
 import re
 
 METRIC_TAG_PREFIX = "experimentlens.metric."
+ROLE_TAG = "experimentlens.conversation_role"
 
 # Metrics named like this are declared as cost metrics (lower is better) when logged.
 COST_METRIC = re.compile(r"latency|duration|cost|tokens|_ms$|_s$", re.IGNORECASE)

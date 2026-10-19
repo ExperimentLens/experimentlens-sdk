@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.6.0
+
+### Added
+- Multi-turn conversations. `with ctx.turn(message) as turn: ... turn.reply(text)` records
+  one turn as a `turn N` span (metadata `turn: N`) in the run's trace, and
+  `ctx.messages(system_prompt)` returns the history so far as chat messages for `call_llm`.
+- Conversation-level evals: `CONVERSATION_METRICS` (conversation_relevance,
+  knowledge_retention, conversation_completeness, role_adherence), `evaluate_conversation()`
+  and `ctx.evaluate_conversation(metrics, role=...)`. Scores are 0..1, logged as
+  `eval_<name>` with `judge_<name>` verdicts on the trace, like `ctx.evaluate()`. The role
+  is saved as the run tag `experimentlens.conversation_role`, so the UI can re-run
+  role_adherence with the same text.
+- `examples/conversation_experiment.py`: a support bot with and without conversation history.
+
 ## 0.5.0
 
 ### Added

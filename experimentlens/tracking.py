@@ -12,7 +12,7 @@ from mlflow.tracking import MlflowClient
 
 from . import __version__
 from .config import SDKConfig
-from .conventions import COST_METRIC, METRIC_TAG_PREFIX
+from .conventions import COST_METRIC, METRIC_TAG_PREFIX, ROLE_TAG
 
 _MAX_TAG_LENGTH = 5000
 
@@ -283,12 +283,27 @@ class ExperimentTracker:
 
 
 @dataclass
+class Turn:
+    """One user message and the assistant's reply, inside `with ctx.turn(...)`."""
+
+    index: int
+    user: str
+    assistant: Optional[str] = None
+
+    def reply(self, text: str) -> None:
+        """Record the assistant's reply to this turn's user message."""
+        self.assistant = text
+
+
+@dataclass
 class RunContext:
     """Handed to experiment code inside a `with tracker.start_run(...) as ctx:` block."""
 
     tracker: ExperimentTracker
     run_id: str
     root_span: Any = None
+    turns: list = field(default_factory=list)  # [{"user": ..., "assistant": ...}] from ctx.turn()
+    _current_user_message: Optional[str] = field(default=None, init=False, repr=False)
 
     def set_trace_io(self, input: Any = None, output: Any = None) -> None:
         """Set the trace-level input/output shown at the top of the Langfuse trace
@@ -503,6 +518,44 @@ class RunContext:
                 obs = _NoopObservation()
             yield obs
 
+    @contextmanager
+    def turn(self, user_message: str) -> Iterator[Turn]:
+        """One turn of a multi-turn conversation: the user's message and the assistant's
+        reply. A run holds the whole conversation, one `turn N` span per turn, e.g.
+
+            for message in case["messages"]:
+                with ctx.turn(message) as turn:
+                    result = call_llm(ctx.messages(system_prompt))
+                    turn.reply(result.text)
+            ctx.evaluate_conversation(["knowledge_retention", "conversation_completeness"])
+
+        LLM calls made inside the block nest under the turn. ExperimentLens shows the
+        turns as a transcript and can evaluate the conversation from the UI.
+        """
+        turn = Turn(index=len(self.turns) + 1, user=user_message)
+        self._current_user_message = user_message
+        try:
+            with self.observe(
+                f"turn {turn.index}", as_type="span", input={"message": user_message}, metadata={"turn": turn.index}
+            ) as obs:
+                yield turn
+                obs.update(output={"answer": turn.assistant})
+        finally:
+            self._current_user_message = None
+        self.turns.append({"user": user_message, "assistant": turn.assistant})
+
+    def messages(self, system_prompt: Optional[str] = None) -> list[dict]:
+        """The conversation so far as chat messages for `call_llm`: the system prompt,
+        every finished turn, and the user message of the turn in progress."""
+        history = [{"role": "system", "content": system_prompt}] if system_prompt else []
+        for turn in self.turns:
+            history.append({"role": "user", "content": turn["user"]})
+            if turn["assistant"] is not None:
+                history.append({"role": "assistant", "content": turn["assistant"]})
+        if self._current_user_message is not None:
+            history.append({"role": "user", "content": self._current_user_message})
+        return history
+
     def log_generation(
         self,
         name: str,
@@ -626,6 +679,42 @@ class RunContext:
             metrics, question=question, answer=answer, context=context,
             expected=expected, model=model, thresholds=thresholds,
         )
+        self._log_eval_report(report)
+        return report
+
+    def evaluate_conversation(
+        self,
+        metrics,
+        *,
+        turns: Optional[list[dict]] = None,
+        role: Optional[str] = None,
+        model: Optional[str] = None,
+        thresholds: Optional[dict] = None,
+    ):
+        """Score the whole conversation recorded with `ctx.turn()` (or the `turns` you
+        pass, as [{"user": ..., "assistant": ...}]) and log the results like
+        `ctx.evaluate()`: MLflow metrics `eval_<name>` plus `judge_<name>` verdicts on
+        the trace. Metrics come from `experimentlens.evals.CONVERSATION_METRICS`;
+        `role` (usually the system prompt) is needed by role_adherence, e.g.
+
+            report = ctx.evaluate_conversation(
+                ["conversation_relevance", "knowledge_retention", "conversation_completeness", "role_adherence"],
+                role=SYSTEM_PROMPT,
+            )
+            return report.metrics()
+        """
+        from .evals import evaluate_conversation
+
+        report = evaluate_conversation(
+            metrics, turns if turns is not None else self.turns, role=role, model=model, thresholds=thresholds,
+        )
+        if role:
+            # Lets the UI re-run role_adherence with the same role text.
+            self.set_tags({ROLE_TAG: role[:_MAX_TAG_LENGTH]})
+        self._log_eval_report(report)
+        return report
+
+    def _log_eval_report(self, report) -> None:
         for name, result in report.items():
             if result.model is None:
                 self.score(name, result.passed, data_type="BOOLEAN", comment=result.reason)
@@ -646,7 +735,6 @@ class RunContext:
                 f"eval_{name}", pass_mark=result.threshold, direction="maximize", kind=result.category
             )
         self.log_metrics(report.metrics())
-        return report
 
     def score(self, name: str, value: Any, data_type: str = "NUMERIC", comment: Optional[str] = None) -> None:
         """Attach a score to this run's trace, e.g. ctx.score("task_success", True, "BOOLEAN")."""
