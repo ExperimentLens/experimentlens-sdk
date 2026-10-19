@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.7.0
+
+### Added
+- `EXPERIMENTLENS_OTLP_ENDPOINT` (`SDKConfig.otlp_endpoint`): also send a copy of every
+  trace to another OpenTelemetry tool (Phoenix, Logfire, Honeycomb, Datadog, ...) over
+  OTLP/HTTP. Traces still go to Langfuse. `/v1/traces` is added if missing; API keys go
+  in the standard `OTEL_EXPORTER_OTLP_HEADERS`. Off unless set.
+- Bring your own OpenTelemetry instrumentation: spans from OpenInference, OpenLLMetry,
+  LangChain, LlamaIndex and similar libraries created inside a run join that run's trace,
+  with or without the setting above.
+- `ctx.otel_attributes()`: the span attributes that link a trace made outside the run
+  (your own tracer, another process) to it. Set them on your root span and export it to
+  Langfuse's OTLP endpoint; the trace then shows up on the run in ExperimentLens.
+
 ## 0.6.0
 
 ### Added

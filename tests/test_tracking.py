@@ -6,7 +6,7 @@ import pytest
 from mlflow.tracking import MlflowClient
 
 from experimentlens import ExperimentTracker
-from experimentlens.tracking import _compute_roc_data
+from experimentlens.tracking import _compute_roc_data, _otlp_tracer_provider
 
 
 def test_ml_experiment_is_tagged_for_the_ml_views_and_has_no_traces(ml_tracker):
@@ -115,3 +115,23 @@ def test_errors_inside_observe_keep_their_type(config):
             with ctx.observe("retrieve"):
                 raise TimeoutError("vector store did not respond")
     tracker._langfuse = None
+
+
+def test_otlp_export_is_off_unless_an_endpoint_is_set():
+    assert _otlp_tracer_provider(None) is None
+    assert _otlp_tracer_provider("") is None
+
+    provider = _otlp_tracer_provider("http://localhost:6006/")
+    # Same provider for the same endpoint, with or without the /v1/traces suffix.
+    assert _otlp_tracer_provider("http://localhost:6006/v1/traces") is provider
+    assert provider.resource.attributes["service.name"] == "experimentlens"
+
+
+def test_otel_attributes_link_outside_spans_to_the_run(config):
+    with ExperimentTracker(f"test-{uuid.uuid4().hex[:8]}", config=config) as tracker:
+        with tracker.start_run("r") as ctx:
+            attrs = ctx.otel_attributes()
+
+    assert attrs["session.id"] == ctx.run_id
+    assert attrs["user.id"] == str(tracker.experiment_id)
+    assert attrs["langfuse.trace.metadata.mlflow_run_id"] == ctx.run_id

@@ -69,6 +69,7 @@ All settings:
 | `EXPERIMENTLENS_MODEL` (or `LLM_MODEL`) | `ollama/llama3.2` | Default model for `call_llm` |
 | `EXPERIMENTLENS_JUDGE_MODEL` | `EXPERIMENTLENS_MODEL` | Default model for LLM-as-judge |
 | `OLLAMA_API_BASE` | `http://localhost:11434` | Where Ollama runs |
+| `EXPERIMENTLENS_OTLP_ENDPOINT` | unset | Also send a copy of every trace to another OpenTelemetry tool (Phoenix, Logfire, Honeycomb, ...); API keys go in `OTEL_EXPORTER_OTLP_HEADERS` |
 
 You can also configure in code, which takes precedence over the environment:
 
@@ -286,6 +287,34 @@ The SDK applies the conventions ExperimentLens uses, so you don't have to:
 | Judge observations | named `judge_<name>`, output `{answer, passed, rationale}` | Shown as judge checks on the trace |
 | Run artifacts | `explainability/` folder | Powers the explainability views |
 | MLflow run tag | `experimentlens.repeat`, `experimentlens.config_hash`, `experimentlens.sdk_version` | Groups repeats and identical configs; records which SDK logged the run |
+
+## Bring your own OpenTelemetry instrumentation
+
+Already tracing with OpenInference, OpenLLMetry, LangChain, LlamaIndex or another
+OpenTelemetry library? Turn it on as usual. Spans it creates inside a run join that
+run's trace and show up in ExperimentLens:
+
+```python
+from openinference.instrumentation.litellm import LiteLLMInstrumentor
+
+LiteLLMInstrumentor().instrument()
+
+with tracker.start_run("variant-a") as ctx:
+    my_pipeline(question)  # its spans land in this run's trace
+```
+
+For traces made outside the run (your own tracer, another process), set
+`ctx.otel_attributes()` on your root span and export it to Langfuse's OTLP endpoint,
+`<LANGFUSE_HOST>/api/public/otel`, with your Langfuse keys as Basic auth. It then
+shows up as an extra trace on the run:
+
+```python
+with tracker.start_run("variant-a") as ctx:
+    link = ctx.otel_attributes()
+
+with my_tracer.start_as_current_span("my_agent", attributes=link):
+    ...
+```
 
 ## API overview
 

@@ -16,6 +16,40 @@ from .conventions import COST_METRIC, METRIC_TAG_PREFIX, ROLE_TAG
 
 _MAX_TAG_LENGTH = 5000
 
+_otlp_providers: dict[str, Any] = {}
+
+
+def _otlp_tracer_provider(endpoint: Optional[str]):
+    """A TracerProvider that also exports every span to `endpoint` over OTLP/HTTP, or
+    None (Langfuse then builds its own). Langfuse adds its exporter to the same
+    provider, so spans reach both. Extra headers (e.g. an API key) come from the
+    standard OTEL_EXPORTER_OTLP_HEADERS variable."""
+    if not endpoint:
+        return None
+    endpoint = endpoint.rstrip("/")
+    if not endpoint.endswith("/v1/traces"):
+        endpoint += "/v1/traces"
+    if endpoint not in _otlp_providers:
+        import os
+
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+        from opentelemetry.sdk.resources import Resource
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export import BatchSpanProcessor
+
+        provider = TracerProvider(
+            resource=Resource.create({"service.name": os.getenv("OTEL_SERVICE_NAME", "experimentlens")})
+        )
+        provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint)))
+        # Like Langfuse's own provider: become the global one if nothing else is, so
+        # spans from other instrumentation (OpenInference, OpenLLMetry, ...) join the run.
+        from opentelemetry import trace
+
+        if isinstance(trace.get_tracer_provider(), trace.ProxyTracerProvider):
+            trace.set_tracer_provider(provider)
+        _otlp_providers[endpoint] = provider
+    return _otlp_providers[endpoint]
+
 
 class _NoopObservation:
     """Stand-in returned by RunContext.observe() when Langfuse is disabled or fails,
@@ -92,6 +126,7 @@ class ExperimentTracker:
                     # base_url, not host: Langfuse ranks the LANGFUSE_BASE_URL env var
                     # above `host`, which would bypass our normalized value.
                     base_url=self.config.langfuse_host,
+                    tracer_provider=_otlp_tracer_provider(self.config.otlp_endpoint),
                 )
             except Exception as exc:  # pragma: no cover - defensive
                 warnings.warn(f"Langfuse disabled: could not initialize client ({exc})")
@@ -325,6 +360,20 @@ class RunContext:
             self.root_span.update(input=input, output=output)
         except Exception:
             pass
+
+    def otel_attributes(self) -> dict:
+        """Span attributes that tie OpenTelemetry traces made OUTSIDE this run (your
+        own tracer, another process) to it, so ExperimentLens shows them under the run.
+        Set them on your root span and export it to Langfuse's OTLP endpoint
+        (`<LANGFUSE_HOST>/api/public/otel`). Spans created inside the `with` block,
+        including other libraries' instrumentation, are linked already."""
+        experiment_id = str(self.tracker.experiment_id)
+        return {
+            "user.id": experiment_id,
+            "session.id": self.run_id,
+            "langfuse.trace.metadata.mlflow_experiment_id": experiment_id,
+            "langfuse.trace.metadata.mlflow_run_id": self.run_id,
+        }
 
     def log_params(self, params: dict) -> None:
         mlflow.log_params(params)

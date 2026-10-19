@@ -78,6 +78,9 @@ class SDKConfig:
     langfuse_secret_key: Optional[str] = None
     langfuse_host: str = "http://localhost:3000"
     langfuse_project_id: Optional[str] = None
+    # Optional second OTLP/HTTP destination (Phoenix, Logfire, Honeycomb, ...). Spans
+    # still go to Langfuse; this sends a copy of each one there too.
+    otlp_endpoint: Optional[str] = None
 
     def __post_init__(self) -> None:
         # Langfuse appends "/api/public/otel/v1/traces" verbatim; a trailing slash
@@ -105,6 +108,7 @@ class SDKConfig:
                 or cls.langfuse_host
             ),
             langfuse_project_id=os.getenv("LANGFUSE_PROJECT_ID") or None,
+            otlp_endpoint=os.getenv("EXPERIMENTLENS_OTLP_ENDPOINT") or None,
         )
         values.update(overrides)
         return cls(**values)
