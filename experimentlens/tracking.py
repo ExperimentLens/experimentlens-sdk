@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import math
+import threading
 import time
 import warnings
 from contextlib import ExitStack, contextmanager
@@ -101,20 +103,21 @@ class ExperimentTracker:
 
         mlflow.set_tracking_uri(self.config.mlflow_tracking_uri)
         self._client = MlflowClient()
+        # Experiment tags are written from worker threads too (each run's last_run_at, metric
+        # declarations), and two concurrent writes of one tag can fail on MLflow's SQL store.
+        self._tag_lock = threading.RLock()
         self.experiment_id = self._get_or_create_experiment(experiment_name)
         mlflow.set_experiment(experiment_name)
 
         # Tags vis-api / vis-frontend rely on to classify and link this experiment.
-        self._client.set_experiment_tag(self.experiment_id, "experiment_type", experiment_type)
+        self._set_experiment_tag("experiment_type", experiment_type)
 
         self._langfuse = None
         self.langfuse_project_id: Optional[str] = None
         if not self._use_langfuse:
             return
 
-        self._client.set_experiment_tag(
-            self.experiment_id, "langfuse.user_id", str(self.experiment_id)
-        )
+        self._set_experiment_tag("langfuse.user_id", str(self.experiment_id))
 
         if self.config.langfuse_public_key and self.config.langfuse_secret_key:
             try:
@@ -140,7 +143,7 @@ class ExperimentTracker:
         project_id = self.config.langfuse_project_id or self._detect_langfuse_project_id()
         self.langfuse_project_id = project_id
         if project_id:
-            self._client.set_experiment_tag(self.experiment_id, "langfuse.project_id", project_id)
+            self._set_experiment_tag("langfuse.project_id", project_id)
         elif self._langfuse is not None:
             warnings.warn(
                 "Could not determine the Langfuse project id; set LANGFUSE_PROJECT_ID "
@@ -155,7 +158,7 @@ class ExperimentTracker:
         names = [n for n in current.split(",") if n]
         if dataset_name not in names:
             names.append(dataset_name)
-            self._client.set_experiment_tag(self.experiment_id, "experimentlens.datasets", ",".join(names))
+            self._set_experiment_tag("experimentlens.datasets", ",".join(names))
 
     def describe_metric(
         self,
@@ -175,23 +178,39 @@ class ExperimentTracker:
         `ctx.evaluate()` declares its eval_* metrics, and metrics named like
         latency/cost/tokens are declared as cost metrics when first logged."""
         definition = {k: v for k, v in {"pass": pass_mark, "direction": direction, "kind": kind}.items() if v is not None}
-        if self._described.get(name) == definition:
-            return
-        self._described[name] = definition
-        self._client.set_experiment_tag(self.experiment_id, f"{METRIC_TAG_PREFIX}{name}", json.dumps(definition))
+        with self._tag_lock:
+            if self._described.get(name) == definition:
+                return
+            self._described[name] = definition
+            self._set_experiment_tag(f"{METRIC_TAG_PREFIX}{name}", json.dumps(definition))
+
+    def _set_experiment_tag(self, key: str, value: str) -> None:
+        with self._tag_lock:
+            self._client.set_experiment_tag(self.experiment_id, key, value)
 
     def set_baseline(self, group: str) -> None:
         """The configuration (e.g. variant name) the UI compares the others against."""
-        self._client.set_experiment_tag(self.experiment_id, "experimentlens.baseline", group)
+        self._set_experiment_tag("experimentlens.baseline", group)
 
-    def set_conventions(self, group_param: Optional[str] = None, case_param: Optional[str] = None) -> None:
+    def set_conventions(
+        self, group_param: Optional[str] = None, case_param: Optional[str] = None, run_unit: Optional[str] = None,
+    ) -> None:
         """Which run param names a configuration and which names a dataset case, when
         you log runs yourself instead of with run_experiment (which uses "variant" and
-        "case_id"). The UI groups runs and builds its case grid from these."""
+        "case_id"). The UI groups runs and builds its case grid from these.
+
+        `run_unit` is "case" when a run is one case (the case is a run param) or
+        "dataset" when a run evaluates a whole dataset with one trace per case (the
+        case id is on each trace's metadata, and the UI compares configurations over
+        the cases' scores rather than over the runs' means)."""
         if group_param:
-            self._client.set_experiment_tag(self.experiment_id, "experimentlens.group_param", group_param)
+            self._set_experiment_tag("experimentlens.group_param", group_param)
         if case_param:
-            self._client.set_experiment_tag(self.experiment_id, "experimentlens.case_param", case_param)
+            self._set_experiment_tag("experimentlens.case_param", case_param)
+        if run_unit:
+            if run_unit not in ("case", "dataset"):
+                raise ValueError('run_unit must be "case" or "dataset"')
+            self._set_experiment_tag("experimentlens.run_unit", run_unit)
 
     def _detect_langfuse_project_id(self) -> Optional[str]:
         """Look up the project the Langfuse API keys belong to."""
@@ -217,17 +236,20 @@ class ExperimentTracker:
         tags: Optional[dict] = None,
         variant: Optional[str] = None,
         trace_metadata: Optional[dict] = None,
+        trace_per_case: bool = False,
     ) -> Iterator["RunContext"]:
         """Start one MLflow run + matching Langfuse trace. Use as a context manager
         around a single experiment case (e.g. one variant x one dataset item).
-        `trace_metadata` is added to the trace's metadata (values become strings)."""
+        `trace_metadata` is added to the trace's metadata (values become strings).
+
+        With `trace_per_case=True` the run gets no trace of its own: it evaluates a
+        whole dataset and each case gets its own trace through `ctx.case(...)`, all
+        in the run's session."""
         with mlflow.start_run(run_name=run_name) as run:
             run_id = run.info.run_id
             # MLflow doesn't bump the experiment's last_update_time for new runs, so
             # record it here; vis-api shows whichever is newer as "last modified".
-            self._client.set_experiment_tag(
-                self.experiment_id, "experimentlens.last_run_at", str(run.info.start_time)
-            )
+            self._set_experiment_tag("experimentlens.last_run_at", str(run.info.start_time))
 
             run_tags = {"experiment_type": self.experiment_type, "experimentlens.sdk_version": __version__}
             # Only claim a linked trace when one is actually being sent; otherwise the
@@ -241,9 +263,22 @@ class ExperimentTracker:
             if params:
                 mlflow.log_params(params)
 
+            # What every trace of this run carries: the run's trace, or each case's.
+            trace_attributes = {
+                "user_id": str(self.experiment_id),
+                "session_id": run_id,
+                "metadata": {
+                    "mlflow_experiment_id": self.experiment_id,
+                    "mlflow_run_id": run_id,
+                    **{k: str(v) for k, v in (params or {}).items()},
+                    **{k: str(v) for k, v in (trace_metadata or {}).items()},
+                },
+                "tags": [t for t in [variant, *(tags or {}).values()] if t],
+            }
+
             with ExitStack() as stack:
                 root_span = None
-                if self._langfuse is not None:
+                if self._langfuse is not None and not trace_per_case:
                     try:
                         root_span = stack.enter_context(
                             self._langfuse.start_as_current_observation(
@@ -252,25 +287,12 @@ class ExperimentTracker:
                         )
                         from langfuse import propagate_attributes
 
-                        langfuse_tags = [t for t in [variant, *(tags or {}).values()] if t]
-                        stack.enter_context(
-                            propagate_attributes(
-                                user_id=str(self.experiment_id),
-                                session_id=run_id,
-                                metadata={
-                                    "mlflow_experiment_id": self.experiment_id,
-                                    "mlflow_run_id": run_id,
-                                    **{k: str(v) for k, v in (params or {}).items()},
-                                    **{k: str(v) for k, v in (trace_metadata or {}).items()},
-                                },
-                                tags=langfuse_tags,
-                            )
-                        )
+                        stack.enter_context(propagate_attributes(**trace_attributes))
                     except Exception as exc:  # pragma: no cover - defensive
                         warnings.warn(f"Langfuse trace setup failed, continuing MLflow-only: {exc}")
                         root_span = None
 
-                ctx = RunContext(tracker=self, run_id=run_id, root_span=root_span)
+                ctx = RunContext(tracker=self, run_id=run_id, root_span=root_span, trace_attributes=trace_attributes)
                 try:
                     yield ctx
                 except Exception as exc:
@@ -337,6 +359,7 @@ class RunContext:
     tracker: ExperimentTracker
     run_id: str
     root_span: Any = None
+    trace_attributes: dict = field(default_factory=dict)  # user/session/metadata/tags for the run's traces
     turns: list = field(default_factory=list)  # [{"user": ..., "assistant": ...}] from ctx.turn()
     _current_user_message: Optional[str] = field(default=None, init=False, repr=False)
 
@@ -530,6 +553,47 @@ class RunContext:
                 with open(roc_path, "w", encoding="utf-8") as f:
                     json.dump(roc_data, f, indent=2)
                 mlflow.log_artifact(roc_path, artifact_path="explainability")
+
+    @contextmanager
+    def case(self, name: str, metadata: Optional[dict] = None) -> Iterator["CaseContext"]:
+        """One dataset case as its own trace, in a run started with `trace_per_case=True`
+        (`run_experiment(..., run_unit="dataset")` does all of this for you), e.g.
+
+            with tracker.start_run("concise", params=config, trace_per_case=True) as run:
+                for case in cases:
+                    with run.case(f"concise__{case['id']}", metadata={"case_id": case["id"]}) as ctx:
+                        ...  # ctx.observe / ctx.evaluate / ctx.set_trace_io, as in a one-case run
+                        ctx.log_metrics({"latency_ms": ...})
+                run.log_metrics({...})  # the run's own metrics, e.g. means over the cases
+
+        The case context's `log_metrics` keeps the values on `ctx.metrics` instead of
+        logging them to MLflow, and attaches them to the case's trace as NUMERIC scores,
+        which is where ExperimentLens reads a case's results. `metadata` lands on the
+        trace (values become strings); the UI reads the case id from the experiment's
+        case param key ("case_id") and the expected answer from "expected". Safe to use
+        from worker threads.
+        """
+        case_ctx = CaseContext(tracker=self.tracker, run_id=self.run_id, trace_attributes=self.trace_attributes)
+        with ExitStack() as stack:
+            if self.tracker._langfuse is not None:
+                # As in observe(), only a failure to start the trace is swallowed.
+                try:
+                    case_ctx.root_span = stack.enter_context(
+                        self.tracker._langfuse.start_as_current_observation(name=name, as_type="span")
+                    )
+                    from langfuse import propagate_attributes
+
+                    stack.enter_context(propagate_attributes(**{
+                        **self.trace_attributes,
+                        "metadata": {
+                            **self.trace_attributes.get("metadata", {}),
+                            **{k: str(v) for k, v in (metadata or {}).items()},
+                        },
+                    }))
+                except Exception as exc:  # pragma: no cover - defensive
+                    warnings.warn(f"Langfuse case trace setup failed, continuing without it: {exc}")
+            yield case_ctx
+            case_ctx._score_metrics()
 
     @contextmanager
     def observe(self, name: str, as_type: str = "span", **kwargs) -> Iterator[Any]:
@@ -821,6 +885,39 @@ class RunContext:
         except Exception:
             pass
 
+
+@dataclass
+class CaseContext(RunContext):
+    """What `RunContext.case()` hands out: the RunContext API aimed at one case's trace.
+    Its MLflow writes name the run explicitly, since a case may run in a worker thread
+    where the run isn't active."""
+
+    metrics: dict = field(default_factory=dict)
+
+    def log_metrics(self, metrics: dict) -> None:
+        clean = {k: v for k, v in metrics.items() if v is not None}
+        self.metrics.update(clean)
+        for name in clean:
+            if name not in self.tracker._described and COST_METRIC.search(name):
+                self.tracker.describe_metric(name, direction="minimize", kind="cost")
+
+    def log_params(self, params: dict) -> None:
+        raise TypeError("a case can't log params (MLflow params are per run); put per-case values in its metadata")
+
+    def set_tags(self, tags: dict) -> None:
+        for key, value in tags.items():
+            self.tracker._client.set_tag(self.run_id, key, value)
+
+    def log_artifact_dict(self, filename: str, data: dict) -> None:
+        self.tracker._client.log_dict(self.run_id, data, filename)
+
+    def log_dataset(self, *args, **kwargs) -> None:
+        raise TypeError("log the dataset on the run, not on one of its cases")
+
+    def _score_metrics(self) -> None:
+        for name, value in self.metrics.items():
+            if isinstance(value, (int, float)) and math.isfinite(value):
+                self.score(name, float(value), data_type="NUMERIC")
 
 def _compute_roc_data(y_test, y_score) -> dict:
     """ROC in the shape ExperimentLens expects: {fpr, tpr, thresholds, roc_auc}.

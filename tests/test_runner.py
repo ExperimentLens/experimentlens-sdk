@@ -125,3 +125,57 @@ def test_print_summary(capsys):
     out = capsys.readouterr().out
     assert "2.000 ± 12.706" in out
     assert "95% confidence interval" in out
+
+
+def test_dataset_unit_logs_one_run_per_variant_with_the_cases_means(ml_tracker):
+    def run_case(variant_name, variant, case, ctx):
+        latency = 100 if case["id"] == "fr" else 300
+        return {"score": 1.0 if variant_name == "concise" else 0.5, "latency_ms": latency}
+
+    results = run_experiment(ml_tracker, VARIANTS, DATASET, run_case, max_workers=2, run_unit="dataset")
+
+    assert [(r["variant"], r["case_id"], r["status"]) for r in results] == [
+        ("concise", "fr", "ok"), ("concise", "jp", "ok"), ("detailed", "fr", "ok"), ("detailed", "jp", "ok"),
+    ]
+    # Cases ran in worker threads; none of them may have opened a run of its own.
+    runs = {r.info.run_name: r for r in _runs(ml_tracker)}
+    assert set(runs) == {"concise", "detailed"}
+    run = runs["detailed"]
+    assert run.info.status == "FINISHED"
+    assert run.data.params == {"variant": "detailed", "system_prompt": "Explain your reasoning.", "temperature": "0.7"}
+    assert run.data.metrics == {
+        "score": 0.5, "latency_ms": 200.0, "latency_p95_ms": 300.0, "n_cases": 2.0, "error_rate": 0.0,
+    }
+    experiment = MlflowClient().get_experiment(ml_tracker.experiment_id)
+    assert experiment.tags["experimentlens.run_unit"] == "dataset"
+
+
+def test_dataset_unit_keeps_going_past_a_failing_case_and_fails_a_run_with_none_left(ml_tracker):
+    def run_case(variant_name, variant, case, ctx):
+        if case["id"] == "jp" or variant_name == "broken":
+            raise RuntimeError("model timed out")
+        return {"score": 1.0}
+
+    results = run_experiment(ml_tracker, {"a": {}, "broken": {}}, DATASET, run_case, run_unit="dataset")
+
+    assert [r["status"] for r in results] == ["ok", "error", "error", "error"]
+    runs = {r.info.run_name: r for r in _runs(ml_tracker)}
+    assert runs["a"].info.status == "FINISHED"
+    assert runs["a"].data.metrics == {"score": 1.0, "n_cases": 2.0, "error_rate": 0.5}
+    assert runs["broken"].info.status == "FAILED"
+    assert runs["broken"].data.tags["error"].startswith("RuntimeError: every case failed")
+
+
+def test_a_case_context_cannot_log_params_or_datasets(ml_tracker):
+    def run_case(variant_name, variant, case, ctx):
+        ctx.log_params({"x": 1})
+
+    results = run_experiment(ml_tracker, {"a": {}}, DATASET[:1], run_case, run_unit="dataset")
+
+    assert results[0]["status"] == "error"
+    assert "per run" in results[0]["error"]
+
+
+def test_rejects_an_unknown_run_unit(ml_tracker):
+    with pytest.raises(ValueError):
+        run_experiment(ml_tracker, VARIANTS, DATASET, lambda *_: {}, run_unit="batch")

@@ -15,12 +15,13 @@ from .regression import (
     notify,
 )
 from .runner import config_hash, print_summary, run_experiment, summarize
-from .tracking import ExperimentTracker, RunContext
+from .tracking import CaseContext, ExperimentTracker, RunContext
 
 __all__ = [
     "SDKConfig",
     "ExperimentTracker",
     "RunContext",
+    "CaseContext",
     "run_experiment",
     "print_summary",
     "summarize",

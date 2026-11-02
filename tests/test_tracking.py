@@ -1,11 +1,12 @@
 import json
 import pickle
 import uuid
+from contextlib import contextmanager
 
 import pytest
 from mlflow.tracking import MlflowClient
 
-from experimentlens import ExperimentTracker
+from experimentlens import ExperimentTracker, run_experiment
 from experimentlens.tracking import _compute_roc_data, _otlp_tracer_provider
 
 
@@ -135,3 +136,77 @@ def test_otel_attributes_link_outside_spans_to_the_run(config):
     assert attrs["session.id"] == ctx.run_id
     assert attrs["user.id"] == str(tracker.experiment_id)
     assert attrs["langfuse.trace.metadata.mlflow_run_id"] == ctx.run_id
+
+
+class _FakeSpan:
+    def __init__(self, name):
+        self.name = name
+        self.trace_id = f"trace-{name}"
+        self.scores = []
+        self.io = None
+
+    def score(self, name, value, data_type=None, comment=None):
+        self.scores.append((name, value, data_type))
+
+    def update(self, input=None, output=None, **kwargs):
+        self.io = (input, output)
+
+
+class _FakeLangfuse:
+    def __init__(self):
+        self.spans = []
+
+    @contextmanager
+    def start_as_current_observation(self, name, as_type="span", **kwargs):
+        span = _FakeSpan(name)
+        self.spans.append(span)
+        yield span
+
+    def flush(self):
+        pass
+
+    def shutdown(self):
+        pass
+
+
+def test_dataset_runs_trace_every_case_in_the_runs_session(config, monkeypatch):
+    import langfuse
+
+    propagated = []
+
+    @contextmanager
+    def propagate_attributes(**attributes):
+        propagated.append(attributes)
+        yield
+
+    monkeypatch.setattr(langfuse, "propagate_attributes", propagate_attributes)
+    with pytest.warns(UserWarning):
+        tracker = ExperimentTracker(f"cases-{uuid.uuid4().hex[:8]}", config=config)
+    tracker._langfuse = fake = _FakeLangfuse()
+    dataset = [{"id": "fr", "question": "Capital of France?", "expected": "Paris"}, {"id": "jp", "question": "Capital of Japan?"}]
+
+    def run_case(variant_name, variant, case, ctx):
+        ctx.set_trace_io(input={"question": case["question"]}, output={"answer": "Paris"})
+        ctx.log_metrics({"eval_correctness": 1.0 if case["id"] == "fr" else 0.0})
+        return {"latency_ms": 10, "total_tokens": 7}
+
+    with tracker:
+        run_experiment(tracker, {"concise": {"top_k": 2}}, dataset, run_case, run_unit="dataset")
+
+    # One trace per case and none for the run itself.
+    assert [span.name for span in fake.spans] == ["concise__fr", "concise__jp"]
+    run = MlflowClient().search_runs([tracker.experiment_id])[0]
+    assert [p["session_id"] for p in propagated] == [run.info.run_id, run.info.run_id]
+    assert propagated[0]["user_id"] == str(tracker.experiment_id)
+    assert propagated[0]["metadata"]["case_id"] == "fr"
+    assert propagated[0]["metadata"]["expected"] == "Paris"
+    assert propagated[0]["metadata"]["top_k"] == "2"
+    assert "expected" not in propagated[1]["metadata"]
+    assert fake.spans[0].io == ({"question": "Capital of France?"}, {"answer": "Paris"})
+    # Each case's metrics are on its trace; the run has their means.
+    assert sorted(fake.spans[1].scores) == [
+        ("eval_correctness", 0.0, "NUMERIC"), ("latency_ms", 10.0, "NUMERIC"), ("total_tokens", 7.0, "NUMERIC"),
+    ]
+    assert run.data.metrics["eval_correctness"] == 0.5
+    assert run.data.tags["langfuse.session_id"] == run.info.run_id
+    assert "langfuse.trace_id" not in run.data.tags

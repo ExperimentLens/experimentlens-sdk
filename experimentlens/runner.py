@@ -30,9 +30,19 @@ def run_experiment(
     repeats: int = 1,
     max_workers: int = 1,
     baseline: Optional[str] = None,
+    run_unit: str = "case",
 ) -> list[dict]:
     """Loop every variant x every dataset case (x every repeat), dual-logging each as
     one MLflow run with a linked Langfuse trace.
+
+    `run_unit="dataset"` logs one MLflow run per variant (x repeat) instead, holding
+    the whole dataset: each case is its own Langfuse trace in the run's session, and
+    the run's metrics are the cases' means (plus `latency_p95_ms`, `n_cases` and
+    `error_rate`). Each case's own metrics go on its trace as NUMERIC scores, which is
+    where ExperimentLens compares configurations case by case. `run_case` is called
+    the same way, with a context aimed at the case's trace; `max_workers` then runs a
+    variant's cases in parallel. Results stay one row per case, ordered variant,
+    repeat, case. A run whose cases all fail is marked failed.
 
     `run_case(variant_name, variant_config, case, ctx)` does the actual work (call an
     LLM, run an agent step, score the output, call ctx.observe/log_generation/score as
@@ -70,9 +80,11 @@ def run_experiment(
         raise ValueError("repeats must be at least 1")
     if max_workers < 1:
         raise ValueError("max_workers must be at least 1")
+    if run_unit not in ("case", "dataset"):
+        raise ValueError('run_unit must be "case" or "dataset"')
 
     # Tell the UI which params group runs and identify cases, and what to compare against.
-    tracker.set_conventions(group_param="variant", case_param="case_id")
+    tracker.set_conventions(group_param="variant", case_param="case_id", run_unit=run_unit)
     if baseline is not None:
         tracker.set_baseline(baseline)
 
@@ -89,6 +101,12 @@ def run_experiment(
         tracker.add_dataset_tag(stored.name)
 
     cases = list(dataset)
+
+    if run_unit == "dataset":
+        return _run_dataset_per_variant(
+            tracker, variants, cases, run_case, case_id_key, log_dataset, repeats, max_workers, stored, dataset_tags,
+        )
+
     jobs = [
         (variant_name, variant_config, case, repeat)
         for variant_name, variant_config in variants.items()
@@ -131,6 +149,107 @@ def run_experiment(
         return [run_one(job) for job in jobs]
     with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="experimentlens") as pool:
         return list(pool.map(run_one, jobs))
+
+
+# Keys of a result row that aren't metrics.
+_ROW_KEYS = {"variant", "case_id", "repeat", "status", "error"}
+
+
+def _run_dataset_per_variant(
+    tracker: ExperimentTracker,
+    variants: dict[str, dict],
+    cases: list[dict],
+    run_case: RunCaseFn,
+    case_id_key: str,
+    log_dataset: bool,
+    repeats: int,
+    max_workers: int,
+    stored: Optional[Dataset],
+    dataset_tags: dict,
+) -> list[dict]:
+    """run_experiment with run_unit="dataset": one run per variant (x repeat), one trace per case."""
+
+    def run_variant(variant_name: str, variant_config: dict, repeat: int) -> list[dict]:
+        run_name = variant_name + (f"__r{repeat}" if repeats > 1 else "")
+        params = {"variant": variant_name, **_flatten_params(variant_config)}
+        tags = {"experimentlens.config_hash": config_hash(variant_config), **dataset_tags}
+        if repeats > 1:
+            tags["experimentlens.repeat"] = str(repeat)
+        rows: list[dict] = []
+        try:
+            with tracker.start_run(run_name, params=params, tags=tags, variant=variant_name, trace_per_case=True) as ctx:
+                if log_dataset:
+                    ctx.log_dataset(cases, name="dataset", context="evaluation")
+
+                def run_one(case: dict) -> dict:
+                    case_id = case.get(case_id_key, "case")
+                    row = {"variant": variant_name, "case_id": case_id, "repeat": repeat}
+                    metadata = {"case_id": case_id}
+                    if case.get("expected") is not None:
+                        metadata["expected"] = case["expected"]
+                    try:
+                        with ctx.case(f"{run_name}__{case_id}", metadata=metadata) as case_ctx:
+                            case_ctx.log_metrics(run_case(variant_name, variant_config, case, case_ctx) or {})
+                            item_id = stored.item_id(case) if stored is not None else None
+                            if item_id and case_ctx.root_span is not None:
+                                link_run_to_item(
+                                    tracker.config,
+                                    run_name=f"{tracker.experiment_name} · {variant_name}",
+                                    item_id=item_id,
+                                    trace_id=case_ctx.root_span.trace_id,
+                                    metadata={"mlflow_run_id": ctx.run_id, "repeat": repeat},
+                                )
+                        return {**row, "status": "ok", **case_ctx.metrics}
+                    except Exception as exc:
+                        return {**row, "status": "error", "error": str(exc)}
+
+                if max_workers == 1:
+                    rows = [run_one(case) for case in cases]
+                else:
+                    with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="experimentlens") as pool:
+                        rows = list(pool.map(run_one, cases))
+
+                ok = [row for row in rows if row["status"] == "ok"]
+                if not ok:
+                    raise RuntimeError(f"every case failed, e.g. {rows[0]['error']}" if rows else "the dataset is empty")
+                ctx.log_metrics(_aggregate(ok, len(rows)))
+        except Exception as exc:
+            if not rows:
+                rows = [
+                    {"variant": variant_name, "case_id": case.get(case_id_key, "case"), "repeat": repeat,
+                     "status": "error", "error": str(exc)}
+                    for case in cases
+                ]
+        return rows
+
+    return [
+        row
+        for variant_name, variant_config in variants.items()
+        for repeat in range(repeats)
+        for row in run_variant(variant_name, variant_config, repeat)
+    ]
+
+
+def _percentile(values: list[float], p: float) -> float:
+    """Nearest-rank percentile, the same as the ExperimentLens overview's."""
+    ordered = sorted(values)
+    return ordered[min(len(ordered) - 1, max(0, math.ceil(p / 100 * len(ordered)) - 1))]
+
+
+def _aggregate(rows: list[dict], n_cases: int) -> dict[str, float]:
+    """A dataset run's metrics from its successful cases: each metric's mean, latency's
+    p95 as well, how many cases ran and the share that failed."""
+    values: dict[str, list[float]] = {}
+    for row in rows:
+        for name, value in row.items():
+            if name not in _ROW_KEYS and isinstance(value, (int, float)) and math.isfinite(value):
+                values.setdefault(name, []).append(float(value))
+    metrics = {name: statistics.fmean(vals) for name, vals in values.items()}
+    if "latency_ms" in values:
+        metrics["latency_p95_ms"] = _percentile(values["latency_ms"], 95)
+    metrics["n_cases"] = float(n_cases)
+    metrics["error_rate"] = (n_cases - len(rows)) / n_cases
+    return metrics
 
 
 def _flatten_params(config: dict, prefix: str = "") -> dict:
