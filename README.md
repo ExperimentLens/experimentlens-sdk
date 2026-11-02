@@ -141,6 +141,21 @@ variant is significantly better than another.
 - Nested variant configs are logged as dotted params:
   `{"retriever": {"k": 5}}` becomes `retriever.k = 5`.
 
+### One run per configuration
+
+By default every (variant, case) pair is its own MLflow run. With
+`run_unit="dataset"` each variant is one run that answers the whole dataset:
+
+```python
+results = run_experiment(tracker, VARIANTS, DATASET, run_case, max_workers=4, run_unit="dataset")
+```
+
+`run_case` stays the same. Each case becomes its own trace in the run, with its
+metrics attached as trace scores, and the run logs the cases' means plus
+`latency_p95_ms`, `n_cases` and `error_rate`. ExperimentLens still compares
+configurations case by case, so the runs table gets one row per configuration
+without losing the statistics.
+
 ## Built-in evaluation metrics
 
 `ctx.evaluate(...)` scores a run's output on ready-made metrics. Every score is
@@ -287,6 +302,7 @@ The SDK applies the conventions ExperimentLens uses, so you don't have to:
 | Judge observations | named `judge_<name>`, output `{answer, passed, rationale}` | Shown as judge checks on the trace |
 | Run artifacts | `explainability/` folder | Powers the explainability views |
 | MLflow run tag | `experimentlens.repeat`, `experimentlens.config_hash`, `experimentlens.sdk_version` | Groups repeats and identical configs; records which SDK logged the run |
+| MLflow experiment tag | `experimentlens.run_unit` = `case` or `dataset` | Whether a run is one case or a whole dataset with one trace per case |
 
 ## Bring your own OpenTelemetry instrumentation
 
@@ -323,9 +339,9 @@ reuses an MLflow experiment. `tracker.start_run(run_name, params=..., tags=...)`
 is a context manager yielding a `RunContext`. Call `tracker.close()` at the end
 to flush traces.
 
-**`run_experiment(tracker, variants, dataset, run_case, repeats=1, max_workers=1)`**
-runs `run_case` for every variant, dataset item and repeat, one MLflow run each,
-and logs the metrics it returns. A case that raises is recorded with status
+**`run_experiment(tracker, variants, dataset, run_case, repeats=1, max_workers=1, run_unit="case")`**
+runs `run_case` for every variant, dataset item and repeat, one MLflow run each
+(or one run per variant with `run_unit="dataset"`), and logs the metrics it returns. A case that raises is recorded with status
 `error` and the rest continue. `summarize(results, metric_names)` returns the
 mean, standard deviation and 95% confidence interval per variant, and
 `print_summary(results, metric_names)` prints them as a table.
@@ -373,6 +389,10 @@ The source distribution includes runnable examples in `examples/`:
 - `rag_experiment.py`: retrieval + generation traced as separate steps.
 - `ml_experiment.py`: hyperparameter grid with explainability data
   (`pip install "experimentlens[examples]"` for scikit-learn).
+- `config_sweep_experiment.py`: a RAG grid of top_k, temperature, prompt style and
+  answer length, one run per configuration x question.
+- `dataset_sweep_experiment.py`: the same sweep with one run per configuration
+  (`run_unit="dataset"`).
 
 ## Troubleshooting
 

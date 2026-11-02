@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.8.0
+
+### Added
+- `run_experiment(..., run_unit="dataset")`: one MLflow run per variant (x repeat) that
+  answers the whole dataset, instead of one run per variant x case. Each case is its own
+  Langfuse trace in the run's session, with `case_id` and `expected` in the trace metadata
+  and its metrics as NUMERIC trace scores. The run logs the cases' means plus
+  `latency_p95_ms`, `n_cases` and `error_rate`, and the experiment is tagged
+  `experimentlens.run_unit=dataset` so ExperimentLens compares configurations case by case.
+  `run_case` is unchanged; `max_workers` runs a variant's cases in parallel.
+- `tracker.start_run(..., trace_per_case=True)` and `ctx.case(name, metadata=)` (a
+  `CaseContext`) to log dataset runs yourself.
+- `examples/dataset_sweep_experiment.py`: the RAG config sweep as one run per configuration.
+
+### Fixed
+- Parallel runs (`max_workers > 1`) could fail with `UNIQUE constraint failed` when two
+  threads wrote the same MLflow experiment tag at once. Experiment tag writes are now
+  serialized.
+
 ## 0.7.0
 
 ### Added
